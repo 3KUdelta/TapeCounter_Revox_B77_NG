@@ -1,6 +1,8 @@
 # B77 Master Controller
 **Version 2.1 · HiFiLabor.ch · Marc Stähli**
 
+> ⚠️ **Work in progress! Use with caution!**
+
 ---
 
 ## Overview
