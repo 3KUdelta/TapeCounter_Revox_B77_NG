@@ -1,539 +1,517 @@
-# B77 Master Controller — Dokumentation
+# B77 Master Controller
 **Version 2.1 · HiFiLabor.ch · Marc Stähli**
 
 ---
 
-## Übersicht
+## Overview
 
-Der B77 Master Controller ist ein Arduino-basiertes Zähler- und Restzeitanzeigesystem für die Revox B77 Tonbandmaschine. Er kombiniert:
+The B77 Master Controller is an Arduino-based tape counter and remaining-time display system for the Revox B77 reel-to-reel tape machine. It combines:
 
-- Den originalen **B77 TapeCounter v2.0** (DIYLab / Marc Stähli) mit OLED-Anzeige, Rotary-Encoder-Bedienung und Rewind-to-Zero
-- Die **Restzeit-Berechnungslogik aus EZS_UNO v1.5** (Bandlängenkalibrierung und Archimedes-Spiralformel)
+- The original **B77 TapeCounter v2.0** (DIYLab / Marc Stähli) with OLED display, rotary encoder navigation and Rewind-to-Zero
+- The **remaining-time calculation logic from EZS_UNO v1.5** — tape length calibration and Archimedes spiral formula for accurate remaining time
 
-Zielplattform: **Arduino Nano Every** (ATmega4809)
+Target hardware: **Arduino Nano Every** (ATmega4809)
 
 ---
 
 ## Hardware
 
-### Mikrocontroller
+### Microcontroller comparison
 
-| Eigenschaft | Nano Every (ATmega4809) | Nano (ATmega328P) |
+| Property | Nano Every (ATmega4809) | Nano (ATmega328P) |
 |---|---|---|
 | SRAM | **6 KB** | 2 KB |
 | Flash | **48 KB** | 32 KB |
-| EEPROM | 256 Bytes | 1024 Bytes |
-| Timer-API | millis() / attachInterrupt() | direkte Register |
-| Interrupt-Pins | alle digitalen Pins | nur pin 2 / 3 |
+| EEPROM | 256 bytes | 1024 bytes |
+| Timer API | millis() / attachInterrupt() | direct registers |
+| Interrupt pins | all digital pins | pin 2 / 3 only |
 
-Der Nano Every wird wegen des grösseren SRAM verwendet. Die Float-Arithmetik der Bandlängenberechnung belegt ca. 130 Bytes zusätzliche Variablen — auf dem 328P war das kritisch knapp.
+The Nano Every is required due to the larger SRAM. The float arithmetic for tape length calculation uses approximately 130 bytes of additional variables — critically tight on the 328P.
 
 ---
 
-### Anschlussplan (Pinbelegung)
+### Pin assignment
 
 ```
 Arduino Nano Every
-┌─────────────────────────────────────┐
-│  Pin  │ Funktion          │ Richtung │
-├───────┼───────────────────┼──────────┤
-│   2   │ SENSOR_B          │ INPUT    │  linke  Spule — Sensor-Pulse
-│   3   │ SENSOR_A          │ INPUT    │  rechte Spule — Sensor-Pulse
-│   4   │ DIRECTION_PIN     │ INPUT_PU │  B77 REW-Signal (LOW=Rückspulen)
-│   5   │ BUTTON            │ INPUT_PU │  Reset-/Bestätigungstaste
-│   6   │ ROTARY_A          │ INPUT    │  Rotary-Encoder Kanal A
-│   7   │ ROTARY_B          │ INPUT    │  Rotary-Encoder Kanal B
-│   8   │ SPEED_PIN         │ INPUT    │  Geschwindigkeitssignal
-│   9   │ PAUSE_PIN         │ INPUT_PU │  B77 Pause-Signal (LOW=Pause)
-│  10   │ REW_PIN           │ OUTPUT   │  Relais: Rückspulen auslösen
-│  11   │ STOP_PIN          │ OUTPUT   │  Relais: Stop auslösen
-│  13   │ LED               │ OUTPUT   │  Onboard-LED (Speicher-Indikator)
-│  A4   │ SDA               │ I²C      │  OLED Display
-│  A5   │ SCL               │ I²C      │  OLED Display
-└─────────────────────────────────────┘
+┌──────────────────────────────────────────┐
+│  Pin  │ Function          │ Direction    │
+├───────┼───────────────────┼──────────────┤
+│   2   │ SENSOR_B          │ INPUT        │  left  reel — sensor pulses
+│   3   │ SENSOR_A          │ INPUT        │  right reel — sensor pulses
+│   4   │ DIRECTION_PIN     │ INPUT_PU     │  B77 REW signal (LOW = rewind)
+│   5   │ BUTTON            │ INPUT_PU     │  reset / confirm button
+│   6   │ ROTARY_A          │ INPUT        │  rotary encoder channel A
+│   7   │ ROTARY_B          │ INPUT        │  rotary encoder channel B
+│   8   │ SPEED_PIN         │ INPUT        │  speed sense (HIGH=7.5ips)
+│   9   │ PAUSE_PIN         │ INPUT_PU     │  B77 pause signal (LOW=pause)
+│  10   │ REW_PIN           │ OUTPUT       │  relay: trigger rewind
+│  11   │ STOP_PIN          │ OUTPUT       │  relay: trigger stop
+│  13   │ LED               │ OUTPUT       │  onboard LED (save indicator)
+│  A4   │ SDA               │ I²C          │  OLED display
+│  A5   │ SCL               │ I²C          │  OLED display
+└──────────────────────────────────────────┘
 INPUT_PU = INPUT_PULLUP
 ```
 
 ---
 
-### Sensor-Konfiguration (Option A)
+### Sensor configuration (Option A)
 
-**Wichtig:** Jede Spule hat einen eigenen Sensor. Dies ist abweichend vom originalen B77 TapeCounter (der zwei Sensoren auf der rechten Spule für Quadratur-Richtungserkennung verwendet).
-
-```
-Linke Spule  ←──── SENSOR_B (HW-006, pin 2)
-                   4 weisse Segmente auf Spulenachse
-
-Rechte Spule ←──── SENSOR_A (HW-006, pin 3)
-                   4 weisse Segmente auf Spulenachse
-
-Richtung     ←──── DIRECTION_PIN (pin 4)
-                   vom B77 REW-Signal-Ausgang
-```
-
-**Physik der Spulenfunktion bei PLAY (Vorwärtslauf):**
+**Important:** Each reel has its own dedicated sensor. This differs from the original B77 TapeCounter (which used two sensors on the right reel for quadrature direction detection).
 
 ```
-Band läuft von links nach rechts:
-  Linke Spule:   gibt Band ab → Radius schrumpft → Umdrehungen schneller
-  Rechte Spule:  nimmt Band auf → Radius wächst  → Umdrehungen langsamer
+Left  reel ←──── SENSOR_B (HW-006 module, pin 2)
+                 4 white segments on left spool axle
+
+Right reel ←──── SENSOR_A (HW-006 module, pin 3)
+                 4 white segments on right spool axle
+
+Direction  ←──── DIRECTION_PIN (pin 4)
+                 connected to B77 REW signal output
 ```
 
-Die **Restzeit** wird aus dem Radius der linken Spule berechnet (`tleftmw`). Ohne Sensor auf der linken Spule wäre keine korrekte Restzeit-Berechnung möglich.
+**Reel physics during PLAY (forward):**
+
+```
+Tape travels from left to right:
+  Left  reel: pays out tape → radius shrinks → revolutions speed up
+  Right reel: takes up tape → radius grows   → revolutions slow down
+```
+
+The **remaining time** is calculated from the left reel radius (`tleftmw`). Without a dedicated sensor on the left reel, accurate remaining-time calculation is not possible.
 
 ---
 
-### SENSOR_B Umbau (von rechts auf links)
+### SENSOR_B relocation (right → left reel)
 
-Der originale B77 TapeCounter hatte beide HW-006-Module auf der **rechten** Spule. Für Version 2.1 muss einer umgebaut werden:
+The original B77 TapeCounter placed both HW-006 modules on the **right** reel. For version 2.1, one module must be relocated:
 
-1. HW-006 von der rechten Spulenachse demontieren
-2. Weissen Segmentstreifen (4 Segmente à 90°) auf der **linken** Spulenachse anbringen
-3. HW-006 so montieren, dass die IR-Lichtschranke die Segmente sauber erfasst
-4. Kabelweg neu verlegen zu Pin 2 am Nano
-
----
-
-### DIRECTION_PIN — Anschluss am B77
-
-Der B77 stellt an seinen Fernsteuer-Pins ein REW-Signal bereit, das LOW ist, solange das Rückspulen aktiv ist.
-
-**Spannungsanpassung (24V → 5V):**
-
-```
-B77 REW-Ausgang (24V)
-        │
-       [10 kΩ]
-        │
-        ├──────────── Arduino Pin 4
-        │
-       [6.8 kΩ]
-        │
-       GND
-
-Spannung an Pin 4:  24V × 6.8 / (10 + 6.8) = 9.7V  → zu hoch!
-
-Besser: 10 kΩ / 3.3 kΩ
-        24V × 3.3 / 13.3 = 5.9V  → noch etwas zu hoch für 5V-Eingang
-
-Empfehlung: 10 kΩ / 2.7 kΩ
-        24V × 2.7 / 12.7 = 5.1V  → grenzwertig
-
-Sicherer: Zener 5.1V parallel zu unterem Widerstand
-  oder: kleiner NPN-Transistor als Pegelwandler (wie im EZS-Schaltbild)
-```
-
-**Transistor-Variante (wie EZS):**
-
-```
-B77 REW (24V) ──[10kΩ]──┬── Basis BC338
-                         │
-                        GND
-Kollektor BC338 ─────────── Arduino Pin 4 (INPUT_PULLUP)
-Emitter  BC338 ──────────── GND
-
-Logik: REW aktiv (24V) → Transistor schaltet durch → Pin 4 = LOW  ✓
-       REW inaktiv (0V) → Transistor sperrt → Pin 4 = HIGH (Pullup) ✓
-```
+1. Remove one HW-006 module from the right reel axle
+2. Attach a white segment strip (4 segments × 90°) to the **left** reel axle
+3. Mount the HW-006 so the IR gate cleanly reads the segments
+4. Re-route the cable to pin 2 on the Nano
 
 ---
 
-### Geschwindigkeitserkennung (SPEED_PIN)
+### DIRECTION_PIN — connecting to the B77
+
+The B77 provides a REW signal on its remote-control connector that is LOW while rewind is active.
+
+**Voltage divider (24V → 5V) — recommended transistor circuit:**
 
 ```
-B77 Kollektor Q1 (Capstan Speed Control PCP)
-  12V bei 7.5 ips (19 cm/s)
-   0V bei 3.75 ips (9.5 cm/s)
+B77 REW output (24V) ──[10 kΩ]──┬── Base of BC338 (or similar NPN)
+                                  │
+                                 GND
+Collector BC338 ─────────────────── Arduino pin 4 (INPUT_PULLUP)
+Emitter   BC338 ─────────────────── GND
 
-Spannungsteiler: R1 = 10 kΩ, R2 = 6.8 kΩ
-  12V × 6.8 / 16.8 = 4.86V → HIGH am Nano Every (5V tolerant) ✓
+Logic:
+  REW active   (24V) → transistor conducts → pin 4 = LOW  ✓
+  REW inactive  (0V) → transistor off      → pin 4 = HIGH (pull-up) ✓
+```
+
+This is identical to the `rewpin` circuit in the EZS_UNO schematic.
+
+---
+
+### Speed detection (SPEED_PIN)
+
+```
+B77 collector Q1 — Capstan Speed Control PCB
+  12V at 7.5 ips (19 cm/s)
+   0V at 3.75 ips (9.5 cm/s)
+
+Voltage divider: R1 = 10 kΩ, R2 = 6.8 kΩ
+  12V × 6.8 / 16.8 = 4.86V → HIGH on Nano Every (5V tolerant) ✓
    0V → LOW ✓
 
-Arduino Pin 8:  HIGH = 7.5 ips (SPEEDMIDDLE = 190.5 mm/s)
+Arduino pin 8:  HIGH = 7.5 ips  (SPEEDMIDDLE = 190.5 mm/s)
                 LOW  = 3.75 ips (SPEEDLOW    =  95.25 mm/s)
 ```
 
 ---
 
-### Rewind-to-Zero Relais
+### Rewind-to-Zero relays
 
 ```
-Arduino Pin 10 (REW_PIN)  ──→ Relais → verbindet 24V Fernsteuer-Pin 3
-Arduino Pin 11 (STOP_PIN) ──→ Relais → verbindet 24V Fernsteuer-Pin 6
+Arduino pin 10 (REW_PIN)  ──→ relay → connects 24V to remote pin 3
+Arduino pin 11 (STOP_PIN) ──→ relay → connects 24V to remote pin 6
 
-Puls: 10 ms HIGH, dann wieder LOW
-  Relais schaltet kurz und löst den jeweiligen Befehl aus.
-```
-
----
-
-### Pause-Eingang
-
-```
-B77 Pause-PCB (z.B. Mauro200id-Umbau, PIC Foot 6)
-  LOW  wenn Pause aktiv
-  HIGH wenn normal
-
-Arduino Pin 9 (PAUSE_PIN, INPUT_PULLUP)
-  Beim Einschalten: Pin ist ca. 3 Sekunden LOW (Initialisierung B77)
-  → Software-Delay von 3s beim ersten Erkennen unterdrückt Fehlauslösung
+Pulse: 10 ms HIGH, then LOW again
+  The relay fires briefly and triggers the respective command.
 ```
 
 ---
 
-### OLED Display
+### Pause input
 
 ```
-SSD1306, 128×32 Pixel, I²C
-  I²C-Adresse: 0x3C  (je nach Modul auch 0x3D)
+B77 Pause PCB (e.g. Mauro200id mod, PIC foot 6)
+  LOW  = pause active
+  HIGH = normal operation
+
+Arduino pin 9 (PAUSE_PIN, INPUT_PULLUP)
+  Note: pin is LOW for ~3 seconds at startup (B77 initialisation)
+  → software delay of 3s suppresses false pause detection on boot
+```
+
+---
+
+### OLED display
+
+```
+SSD1306, 128×32 pixels, I²C
+  I²C address: 0x3C  (0x3D on some modules)
   SDA → Arduino A4
   SCL → Arduino A5
-  VCC → 3.3V oder 5V (je nach Modul)
+  VCC → 3.3V or 5V (depending on module)
   GND → GND
 
-Ausrichtung: 180° gedreht (FLIPDISPLAY = true)
+Orientation: 180° rotated (FLIPDISPLAY = true)
 ```
 
 ---
 
-### Rotary Encoder
+### Rotary encoder
 
 ```
-EC12 RE1 (360°, mit Drucktaste)
-  Kanal A → Pin 6
-  Kanal B → Pin 7
-  Taste   → Pin 5 (BUTTON, gemeinsam mit Reset)
-  GND     → GND
-  VCC     → 3.3V oder 5V
+EC12 RE1 (360°, with push button)
+  Channel A → pin 6
+  Channel B → pin 7
+  Button    → pin 5 (shared with BUTTON / reset)
+  GND       → GND
+  VCC       → 3.3V or 5V
 
-Bibliothek: Encoder.h (Paul Stoffregen)
-  ENCODER_DO_NOT_USE_INTERRUPTS gesetzt
-  → polling im Loop, keine Interrupt-Konflikte
+Library: Encoder.h (Paul Stoffregen)
+  ENCODER_DO_NOT_USE_INTERRUPTS defined
+  → polled in loop(), no interrupt conflicts
 ```
 
 ---
 
-## Software-Architektur
+## Software architecture
 
-### Dateistruktur
+### File structure
 
 ```
 B77_Master/
-├── B77_TapeCounter_Master.ino   Hauptdatei: setup(), loop(), Display,
-│                                 Encoder, Button, Geschwindigkeit
-├── sensor_isr.ino               ISR für beide Spulensensoren
-├── runmode.ino                  5-ms-Task: gleitender Mittelwert,
-│                                 STOP-Erkennung, Spulengrösse
-├── tape_calc.ino                Kalibrierung und Restzeit-Berechnung
-│                                 (portiert aus EZS_UNO v1.5)
-├── config.h                     Alle Konstanten, Pins, EEPROM-Layout
-├── tapecounter_16x24.h          OLED-Font 16×24 px
-├── tapecounter_21x32.h          OLED-Font 21×32 px
-└── logo_mst1.h                  Startbild 128×32 px (RevVox Logo)
+├── B77_TapeCounter_Master.ino   Main file: setup(), loop(), display,
+│                                 encoder, button, speed detection
+├── sensor_isr.ino               ISR for both reel sensors
+├── runmode.ino                  5 ms task: moving average calculation,
+│                                 STOP detection, reel size detection
+├── tape_calc.ino                Calibration and remaining-time calculation
+│                                 (ported from EZS_UNO v1.5)
+├── config.h                     All constants, pins, EEPROM layout
+├── tapecounter_16x24.h          OLED font 16×24 px
+├── tapecounter_21x32.h          OLED font 21×32 px
+└── logo_mst1.h                  Splash image 128×32 px (RevVox logo)
 ```
 
 ---
 
-### Aufrufreihenfolge im Loop
+### Call sequence in loop()
 
 ```
-loop() — jede Iteration (~1 ms)
+loop() — every iteration (~1 ms)
   │
   ├── btn.tick()                      OneButton polling
-  ├── Encoder lesen                   alle 4 Schritte → EncoderRotated()
-  ├── PAUSE_PIN prüfen                OLED "PAUSE" / Display wiederherstellen
+  ├── read encoder                    every 4 steps → EncoderRotated()
+  ├── check PAUSE_PIN                 display "PAUSE" / restore display
   │
-  ├── alle 5 ms:
-  │     runmode_b77_tick()            ms-Zähler und Ring-Buffer-Akkumulatoren
-  │     runmode_b77()                 gleitende Mittelwerte, STOP-Erkennung
-  │     tape_restlauf()               Restzeit (Archimedes-Spirale, 1×/Umdrehung)
-  │     tape_lenrout()                Absolutposition, Drift-Korrektur
+  ├── every 5 ms:
+  │     runmode_b77_tick()            tick ms-counters and ring buffer accumulators
+  │     runmode_b77()                 moving averages, STOP detection
+  │     tape_restlauf()               remaining time (Archimedes, 1×/revolution)
+  │     tape_lenrout()                absolute position, drift correction
   │
-  ├── alle 30 ms:
-  │     CalculatingDisplayParameters() Geschwindigkeit pollen
-  │     RefreshDisplay()               OLED aktualisieren (wenn nicht gesperrt)
+  ├── every 30 ms:
+  │     CalculatingDisplayParameters() poll speed input
+  │     RefreshDisplay()               update OLED (if not locked)
   │
-  ├── alle 500 ms:
-  │     isMoving aktualisieren         für Rew2Zero-Logik
+  ├── every 500 ms:
+  │     update isMoving               used by Rew2Zero logic
   │
-  ├── alle 1000 ms:
-  │     operatingHoursCounter++        Betriebsstunden
-  │     saveCounter++                  EEPROM-Speicher-Trigger
+  ├── every 1000 ms:
+  │     operatingHoursCounter++       operating hours
+  │     saveCounter++                 EEPROM save trigger
   │
-  └── wenn saveCounter >= 4:
-        SaveCounter()                  EEPROM schreiben + LED blinken
+  └── when saveCounter >= 4:
+        SaveCounter()                 write EEPROM + blink LED
 ```
 
 ---
 
-### Interrupt-Service-Routinen
+### Interrupt service routines
 
 ```
-CheckState()   — SENSOR_A CHANGE (rechte Spule, pin 3)
-  Fallende Flanke: tlkurz = 0
-  Steigende Flanke (wenn tlkurz >= 1 ms):
-    → tright[] Ring-Buffer rotieren
+CheckState()   — SENSOR_A CHANGE (right reel, pin 3)
+  Falling edge: tlkurz = 0
+  Rising edge (if tlkurz >= 1 ms):
+    → rotate tright[] ring buffer
     → umrabs ±1
-    → counter ±1 (alle PULSES_COUNTER=2 Pulse)
-    → counterMeters, counterSeconds akkumulieren
+    → counter ±1 (every PULSES_COUNTER = 2 pulses)
+    → accumulate counterMeters, counterSeconds
     → runflg++
 
-CheckStateB()  — SENSOR_B CHANGE (linke Spule, pin 2)
-  Fallende Flanke: trkurz = 0
-  Steigende Flanke (wenn trkurz >= 1 ms):
-    → tleft[] Ring-Buffer rotieren
+CheckStateB()  — SENSOR_B CHANGE (left reel, pin 2)
+  Falling edge: trkurz = 0
+  Rising edge (if trkurz >= 1 ms):
+    → rotate tleft[] ring buffer
     → umlabs ±1
     → runflg++
 
-Richtung in beiden ISRs:
+Direction in both ISRs:
   dirForward = (digitalRead(DIRECTION_PIN) == HIGH)
 ```
 
 ---
 
-## Anzeigemodi
+## Display modes
 
-Der Rotary Encoder schaltet zwischen drei Modi:
+The rotary encoder cycles through three modes:
 
-| Mode | Anzeige | Beschreibung |
+| Mode | Display | Description |
 |---|---|---|
-| 0 | ` 12345` | Impulszähler (rechte Spule, 5-stellig, Vorzeichen) |
-| 1 | ` 042'37` | Abgelaufene Zeit in Min'Sek (aus counterSeconds) |
-| 2 | `R045'12` | **Restzeit** in Min'Sek (aus resttime) |
+| 0 | ` 12345` | Pulse counter (right reel, 5 digits, signed) |
+| 1 | ` 042'37` | Elapsed time in min'sec (from counterSeconds) |
+| 2 | `R045'12` | **Remaining time** in min'sec (from resttime) |
 
-Im Modus 2, solange die Kalibrierung läuft:
+In mode 2 while calibration is running:
 ```
-CAL 24    ← Anzahl verbleibender Umdrehungen bis Kalibrierung abgeschlossen
+CAL 24    ← remaining revolutions until calibration completes
 ```
 
 ---
 
-## Bedienung
+## Operation
 
-### Normalbetrieb
+### Normal use
 
-| Aktion | Funktion |
+| Action | Function |
 |---|---|
-| Encoder drehen (rechts) | Nächster Modus (0→1→2→0) |
-| Encoder drehen (links) | Vorheriger Modus (0→2→1→0) |
-| Taste 1× drücken | Alle Zähler zurücksetzen (counter, counterSeconds, resttime, timeword) |
-| Taste 2× drücken | Rewind-to-Zero starten (wenn counter > 0 oder timeword > 10 s) |
-| Taste lang halten | Helligkeit einstellen (16 Stufen, blinkt beim Speichern) |
-| Taste beim Einschalten | Betriebsstunden anzeigen |
+| Rotate encoder clockwise | Next mode (0→1→2→0) |
+| Rotate encoder counter-clockwise | Previous mode (0→2→1→0) |
+| Single click | Reset all counters (counter, counterSeconds, resttime, timeword) |
+| Double click | Start Rewind-to-Zero (if counter > 0 or timeword > 10 s) |
+| Long press | Adjust brightness (16 steps, blinks on save) |
+| Hold button at power-on | Display operating hours |
 
 ### Rewind-to-Zero
 
-Der Ablauf verwendet `timeword` (Bandposition in Sekunden) als Referenz — unabhängig von Spulengrösse und Geschwindigkeit:
+The procedure uses `timeword` (tape position in seconds) as its reference — independent of reel size and tape speed:
 
 ```
-Phase 0 (Grob):   timeword >= 120 s  → voller Rückspul-Speed
-                   timeword <  120 s  → doStop() → Phase 1
+Phase 0 (coarse):  timeword >= 120 s  → full rewind speed
+                   timeword <  120 s  → doStop() → phase 1
 
-Phase 1 (Fein):   Band steht → doRewind() (kurzer Burst)
-                   timeword <   30 s  → doStop() → Phase 2
+Phase 1 (fine):    band stopped → doRewind() (short burst)
+                   timeword <   30 s  → doStop() → phase 2
 
-Phase 2 (Fertig): Band steht → rewindToZero = false, Display refresh
+Phase 2 (done):    band stopped → rewindToZero = false, refresh display
 
-Sicherheit:       timeword <=   5 s  → Notstopp (jede Phase)
-                   30 s kein Fortschritt → Abbruch (Bandklemmer / Riss)
+Safety:            timeword <=   5 s  → emergency stop (any phase)
+                   no movement for 30 s → abort (tape jam / break)
 ```
 
 ---
 
-## Kalibrierung der Restzeit
+## Remaining time calibration
 
-### Prinzip
+### Physics
 
-Die Restzeit basiert auf der **Archimedes-Spirale** des Bandwickels:
+The remaining time is based on the **Archimedes spiral** of the tape wound on the reel:
 
 ```
-r₀  = Innenradius rechte Spule bei Bandanfang
+r₀  = inner radius of right reel at band start
        = minrightl / (2π)
 
-r₁  = aktueller Aussenradius linke Spule
+r₁  = current outer radius of left reel
        = (tleftmw × speed) / (2π)
 
-Restzeit = π × (r₁² − r₀²) / (lend × timekorr × speed)
+Remaining time = π × (r₁² − r₀²) / (lend × timekorr × speed)
 
-lend     = Banddicke in µm  (aus automatischer Kalibrierung)
-timekorr = Driftkorrekturfaktor (startet 1.0, passt sich an)
+lend     = tape thickness in µm  (from auto-calibration)
+timekorr = drift correction factor (starts at 1.0, adapts slowly)
 ```
 
-### Kalibrierungsablauf
+### Calibration sequence
 
-Die Kalibrierung startet automatisch beim **Bandanfang** (rechte Spule hat minimale Periode → `trightmw < mintime`):
+Calibration starts automatically at **band start** (right reel reaches minimum period → `trightmw < mintime`):
 
 ```
-1. Bandanfang erkannt:
-   → minrightl = trightmw × speedActual    (Referenz-Innenradius)
+1. Band start detected:
+   → minrightl = trightmw × speedActual    (reference inner radius)
    → calflg = 1
-   → OLED zeigt "CAL xx" (Countdown)
+   → OLED shows "CAL xx" (countdown)
 
-2. Während UMMAX = 30 Umdrehungen:
-   → Periodenwachstum der rechten Spule wird gemessen
+2. During UMMAX = 30 revolutions:
+   → period growth of right reel is measured
 
-3. Nach 30 Umdrehungen:
-   → lend (Banddicke µm) wird aus Radiuszuwachs berechnet
+3. After 30 revolutions:
+   → lend (tape thickness µm) computed from radius growth
    → calflg = 0
-   → Werte werden in EEPROM gespeichert
-   → Restzeit-Anzeige startet
+   → values saved to EEPROM
+   → remaining-time display starts
 
-4. Bei jedem weiteren Abspielen:
-   → cc (Driftkorrektor × 1000) passt sich langsam an
-   → Bereich: 900..1100  (±10% Korrekturfenster)
+4. On subsequent playbacks:
+   → cc (drift corrector × 1000) adapts slowly
+   → range: 900..1100  (±10% correction window)
 ```
 
-### Typische Banddicken
+### Typical tape thickness values
 
-| Spulentyp | Banddicke | `lend` Wert |
+| Reel type | Tape thickness | `lend` value |
 |---|---|---|
-| 26 cm Spule, Standardband | ~35 µm | 35 |
-| 26 cm Spule, Langspielband | ~26 µm | 26 |
-| 22 cm Spule | ~26–35 µm | je nach Band |
+| 26 cm reel, standard tape | ~35 µm | 35 |
+| 26 cm reel, long-play tape | ~26 µm | 26 |
+| 22 cm reel | ~26–35 µm | depends on tape |
 
 ---
 
-## EEPROM-Layout (Nano Every, 256 Bytes)
+## EEPROM layout (Nano Every, 256 bytes)
 
-| Adresse | Grösse | Variable | Inhalt |
+| Address | Size | Variable | Content |
 |---|---|---|---|
-| 0 | 1 B | `EE_MODE` | Letzter Anzeigemodus (0/1/2) |
-| 1 | 1 B | `EE_BRIGHTNESS` | Displayhelligkeit (0–16) |
-| 2–5 | 4 B | `EE_COUNTER` | Impulszähler (int32) |
-| 10–13 | 4 B | `EE_SECONDS` | Abgelaufene Zeit (float) |
-| 20–23 | 4 B | `EE_OPHOURS` | Betriebsstunden (uint32) |
-| 30–33 | 4 B | `EE_MINRIGHTL` | Kalibrierung: r₀-Metrik (int32) |
-| 34–35 | 2 B | `EE_LEND` | Banddicke µm (int16) |
-| 36–37 | 2 B | `EE_CC` | Driftkorrekturfaktor × 1000 (int16) |
-| 254 | 1 B | `EE_INIT_A` | Erstinitialisierungs-Marker |
-| 255 | 1 B | `EE_INIT_B` | Erstinitialisierungs-Marker |
-| **gesamt** | **38 B** | | **218 B frei** |
+| 0 | 1 B | `EE_MODE` | Last display mode (0/1/2) |
+| 1 | 1 B | `EE_BRIGHTNESS` | Display brightness (0–16) |
+| 2–5 | 4 B | `EE_COUNTER` | Pulse counter (int32) |
+| 10–13 | 4 B | `EE_SECONDS` | Elapsed time (float) |
+| 20–23 | 4 B | `EE_OPHOURS` | Operating hours (uint32) |
+| 30–33 | 4 B | `EE_MINRIGHTL` | Calibration: r₀ metric (int32) |
+| 34–35 | 2 B | `EE_LEND` | Tape thickness µm (int16) |
+| 36–37 | 2 B | `EE_CC` | Drift correction factor × 1000 (int16) |
+| 254 | 1 B | `EE_INIT_A` | First-run initialisation marker |
+| 255 | 1 B | `EE_INIT_B` | First-run initialisation marker |
+| **total** | **38 B** | | **218 B free** |
 
-EEPROM wird geschrieben:
-- **Alle 4 Sekunden** wenn Band läuft (Zählerstand, Betriebsstunden)
-- **Alle 10 Minuten** Betriebsstunden-Backup
-- **Nach Kalibrierung** `lend`, `minrightl`, `cc`
-- **Bei Helligkeitsänderung** und **Moduswechsel**
+EEPROM is written:
+- **Every 4 seconds** while the tape is running (counter state, operating hours)
+- **Every 10 minutes** operating hours backup
+- **After calibration** `lend`, `minrightl`, `cc`
+- **On brightness change** and **mode change**
 
 ---
 
-## Einstellbare Parameter (`config.h`)
+## Configurable parameters (`config.h`)
 
 ### Display
 
-| Parameter | Standardwert | Beschreibung |
+| Parameter | Default | Description |
 |---|---|---|
-| `HELLO_LOGO` | `true` | Startlogo anzeigen |
-| `HELLO_TIMEOUT` | `3000` | Anzeigedauer Startbild [ms] |
-| `BRIGHTNESS` | `128` | Anfangshelligkeit (0–255) |
-| `FLIPDISPLAY` | `true` | Display 180° gedreht |
-| `INVERTDISPLAY` | `false` | Invertiertes Display |
-| `OLED_X_OFFSET` | `2` | Horizontale Verschiebung [px] |
-| `OLED_Y_OFFSET` | `0` | Vertikale Verschiebung [px] |
-| `I2C_ADDRESS` | `0x3C` | I²C-Adresse (0x3C oder 0x3D) |
-| `DIGITS_COUNTER` | `5` | Stellen für Impulszähler |
-| `DIGITS_MINUTES` | `3` | Stellen für Minuten (Zeitanzeige) |
+| `HELLO_LOGO` | `true` | Show splash logo |
+| `HELLO_TIMEOUT` | `3000` | Splash display duration [ms] |
+| `BRIGHTNESS` | `128` | Initial brightness (0–255) |
+| `FLIPDISPLAY` | `true` | Display rotated 180° |
+| `INVERTDISPLAY` | `false` | Inverted display |
+| `OLED_X_OFFSET` | `2` | Horizontal pixel offset |
+| `OLED_Y_OFFSET` | `0` | Vertical pixel offset |
+| `I2C_ADDRESS` | `0x3C` | I²C address (0x3C or 0x3D) |
+| `DIGITS_COUNTER` | `5` | Counter display digits |
+| `DIGITS_MINUTES` | `3` | Minutes digits in time display |
 
-### Sensorgeometrie
+### Sensor geometry
 
-| Parameter | Standardwert | Beschreibung |
+| Parameter | Default | Description |
 |---|---|---|
-| `NUMSEGS` | `4` | Segmente pro Spulenumdrehung |
-| `SCOPE` | `580` | Trimm-Wert für Meter-/Sekunden-Anzeige |
-| `PULSES_COUNTER` | `2` | Pulse pro Zähler-Inkrement |
+| `NUMSEGS` | `4` | Segments per reel revolution |
+| `SCOPE` | `580` | Trim value for meter/seconds display |
+| `PULSES_COUNTER` | `2` | Pulses per counter increment |
 
-### Geschwindigkeit
+### Tape speed
 
-| Parameter | Wert | Beschreibung |
+| Parameter | Value | Description |
 |---|---|---|
 | `SPEEDMIDDLE` | `190.5 mm/s` | 7.5 ips (19 cm/s) |
 | `SPEEDLOW` | `95.25 mm/s` | 3.75 ips (9.5 cm/s) |
 
-### Spulengrössen-Schwellwerte [ms/Umdrehung]
+### Reel size detection thresholds [ms/revolution]
 
-| Konstante | 26 cm | 22 cm | 18 cm |
+| Constant | 26 cm | 22 cm | 18 cm |
 |---|---|---|---|
 | `TMIN` | 1900 | 1720 | 1050 |
 | `TMID` | 3248 | 2692 | 2044 |
 | `TMAX` | 4200 | 3450 | 2698 |
 
-Quelle: EZS_UNO v1.5 (empirisch ermittelt bei 19 cm/s mit Revox/BASF-Bändern).
+Values from EZS_UNO v1.5 (empirically measured at 19 cm/s with Revox/BASF tapes).
 
-### Kalibrierung
+### Calibration
 
-| Parameter | Standardwert | Beschreibung |
+| Parameter | Default | Description |
 |---|---|---|
-| `UMMAX` | `30` | Umdrehungen für Banddicken-Kalibrierung |
+| `UMMAX` | `30` | Revolutions for tape-thickness calibration |
 
-### Rewind-to-Zero [Sekunden]
+### Rewind-to-Zero [seconds]
 
-| Parameter | Standardwert | Beschreibung |
+| Parameter | Default | Description |
 |---|---|---|
-| `REW2ZERO_COARSE_SECS` | `120` | Umschalten auf Fein-Rückspulen |
-| `REW2ZERO_FINE_SECS` | `30` | Endstopp-Schwelle |
-| `REW2ZERO_FINAL_SECS` | `5` | Absoluter Notstopp |
-| `REW2ZERO_MIN_SECS` | `10` | Mindest-Position für Auslösung |
-| `REW2ZERO_TIMEOUT_SECS` | `30` | Abbruch bei Stillstand [s] |
+| `REW2ZERO_COARSE_SECS` | `120` | Switch to fine rewind below this position |
+| `REW2ZERO_FINE_SECS` | `30` | Final stop threshold |
+| `REW2ZERO_FINAL_SECS` | `5` | Absolute emergency stop |
+| `REW2ZERO_MIN_SECS` | `10` | Minimum position to trigger procedure |
+| `REW2ZERO_TIMEOUT_SECS` | `30` | Abort if no movement for this long |
 
 ---
 
-## Bibliotheken
+## Libraries
 
-| Bibliothek | Version | Zweck |
+| Library | Source | Purpose |
 |---|---|---|
-| `OneButton` | aktuell | Einfach-/Doppel-/Langdruck-Erkennung |
-| `Encoder` | aktuell | Rotary-Encoder-Auswertung (polling) |
-| `EEPROM` | Arduino built-in | Persistente Datenspeicherung |
-| `SSD1306Ascii` | greiman | OLED-Ansteuerung (kein U8g2, spart Flash) |
-| `Wire` | Arduino built-in | I²C für OLED |
+| `OneButton` | mathertel/OneButton | Single / double / long-press detection |
+| `Encoder` | PaulStoffregen/Encoder | Rotary encoder (polled mode) |
+| `EEPROM` | Arduino built-in | Persistent data storage |
+| `SSD1306Ascii` | greiman/SSD1306Ascii | OLED driver (no U8g2, saves Flash) |
+| `Wire` | Arduino built-in | I²C for OLED |
 
 ---
 
-## Fehlersuche
+## Troubleshooting
 
-### OLED zeigt `CAL xx` dauerhaft
+### OLED permanently shows `CAL xx`
 
-Die Kalibrierung wurde noch nie erfolgreich abgeschlossen. Ursachen:
-- Band liegt nicht am Anfang (rechte Spule noch nicht leer genug)
-- `TMIN26` zu hoch eingestellt → `trightmw < mintime` wird nie erreicht
-- Sensor auf rechter Spule defekt oder falsch ausgerichtet
+Calibration has never completed successfully. Possible causes:
+- Tape is not at band start (right reel not yet empty enough)
+- `TMIN26` threshold too high → `trightmw < mintime` never triggered
+- Sensor on right reel faulty or misaligned
 
-Abhilfe: Band vollständig zurückspulen, dann PLAY drücken und 30 Umdrehungen abwarten.
+Fix: Fully rewind the tape, then press PLAY and allow 30 revolutions to complete.
 
-### Restzeit springt oder ist ungenau
+### Remaining time jumps or is inaccurate
 
-- `lend` falsch kalibriert → einmal komplett neu kalibrieren (Band zurück, PLAY)
-- `SCOPE` zu weit von 580 entfernt → `counterSeconds` weicht ab von echter Zeit → `cc` kann nicht konvergieren
-- Sensor-Segmente verschmutzt → unregelmässige Pulse → Ring-Buffer erhält Ausreisser
+- `lend` calibrated incorrectly → trigger a fresh calibration (fully rewind, then play)
+- `SCOPE` too far from 580 → `counterSeconds` drifts from real time → `cc` cannot converge
+- Sensor segments dirty → irregular pulses → ring buffer receives outliers
 
-### Rewind-to-Zero stoppt zu früh / zu spät
+### Rewind-to-Zero stops too early or too late
 
-Werte in `config.h` anpassen:
-- Zu früh: `REW2ZERO_FINE_SECS` verkleinern
-- Zu spät: `REW2ZERO_COARSE_SECS` verkleinern
-- Bei 9.5 cm/s längere Bremswege: `REW2ZERO_COARSE_SECS` auf 180 erhöhen
+Adjust values in `config.h`:
+- Stops too early: reduce `REW2ZERO_FINE_SECS`
+- Stops too late: reduce `REW2ZERO_COARSE_SECS`
+- At 3.75 ips longer braking distances: increase `REW2ZERO_COARSE_SECS` to 180
 
-### DIRECTION_PIN erkennt Richtung falsch
+### DIRECTION_PIN reads wrong direction
 
-- Spannungsteiler prüfen: Pin 4 muss bei REW-aktiv < 0.8V haben
-- Transistor-Variante bevorzugen (sicherere Pegelanpassung)
-- Mit Multimeter messen: B77 REW-Ausgang = 24V aktiv, 0V inaktiv
+- Check voltage divider: pin 4 must be < 0.8V when REW is active
+- Use the transistor circuit (more reliable level shifting)
+- Measure with a multimeter: B77 REW output = 24V active, 0V inactive
 
 ---
 
-## Versionsgeschichte
+## Changelog
 
-| Version | Datum | Änderungen |
+| Version | Date | Changes |
 |---|---|---|
 | 1.0 | 2020 | Original DIYLab B77 TapeCounter |
-| 2.0 | Okt. 2023 | Marc Stähli: B77 MKI Anpassungen, Encoder, Pause, Rewind-to-Zero |
-| 2.1 | März 2026 | Restzeit-Berechnung (EZS-Port), Nano Every, Option-A Sensor-Umbau, timeword-basiertes Rewind-to-Zero, `sensor_isr.ino` / `runmode.ino` / `tape_calc.ino` neu |
+| 2.0 | Oct 2023 | Marc Stähli: B77 MKI adaptations, encoder, pause, Rewind-to-Zero |
+| 2.1 | Mar 2026 | Remaining-time calculation (EZS port), Nano Every target, Option-A dual-reel sensors, timeword-based Rewind-to-Zero, new `sensor_isr.ino` / `runmode.ino` / `tape_calc.ino` |
 
 ---
 
-## Quellen
+## Credits & references
 
-- EZS_UNO v1.5 — Bandlängen- und Restzeitlogik (Archimedes-Spirale)
-- [github.com/3KUdelta/TapeCounter_Revox_B77](https://github.com/3KUdelta/TapeCounter_Revox_B77) — Originalprojekt v2.0
-- [old-fidelity-forum.de](https://old-fidelity-forum.de/thread-38940.html) — Community, gogosch (Geschwindigkeitsformel)
-- Revox B77 Service Manual — Fernsteuer-Pinbelegung, Transistor Q1 Capstan PCB
+- EZS_UNO v1.5 — tape length and remaining-time logic (Archimedes spiral)
+- [github.com/3KUdelta/TapeCounter_Revox_B77](https://github.com/3KUdelta/TapeCounter_Revox_B77) — original project v2.0
+- [old-fidelity-forum.de](https://old-fidelity-forum.de/thread-38940.html) — community contributions, user "gogosch" (speed formula)
+- Revox B77 Service Manual — remote connector pinout, transistor Q1 capstan PCB
